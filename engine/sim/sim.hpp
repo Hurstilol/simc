@@ -169,6 +169,7 @@ struct sim_t : private sc_thread_t
   int scale_to_itemlevel; //itemlevel to scale to. if -1, we don't scale down
   int keystone_level; // keystone difficulty for scaling purposes
   int keystone_pct_hp;     // keystone mob health percent
+  std::string keystone_bounty; // Shrouded bounty stat type
   bool challenge_mode; // if active, players will get scaled down to 620 and set bonuses are deactivated
   bool scale_itemlevel_down_only; // Items below the value of scale_to_itemlevel will not be scaled up.
   bool disable_set_bonuses; // Disables all set bonuses.
@@ -179,7 +180,7 @@ struct sim_t : private sc_thread_t
   unsigned int enable_2_set;// Enables all 2 set bonuses for the tier/integer that this is set as
   unsigned int enable_4_set; // Enables all 4 set bonuses for the tier/integer that this is set as
   const spell_data_t* pvp_rules; // Hidden aura that contains the PvP crit damage reduction
-  bool pvp_crit; // Enables crit damage reduction in PvP
+  bool pvp_mode; // Enables PvP mode - reduces crit damage, adjusts PvP gear iLvl
   bool feast_as_dps = true;
   bool auto_attacks_always_land; /// Allow Auto Attacks (white attacks) to always hit the enemy
   bool log_spell_id; // Add spell data ids to log/debug output where available. (actions, buffs)
@@ -202,7 +203,7 @@ struct sim_t : private sc_thread_t
   // Raid Events
   std::vector<std::unique_ptr<raid_event_t>> raid_events;
   std::string raid_events_str;
-  std::string fight_style;
+  fight_style_e fight_style;
   size_t add_waves;
 
   // Buffs and Debuffs Overrides
@@ -429,8 +430,10 @@ struct sim_t : private sc_thread_t
     timespan_t reactive_defense_matrix_interval = 0_ms;
     /// Percentage of default duration for Field of Blossoms.
     double field_of_blossoms_duration_multiplier = 1.0;
-    /// Modifier for Cruciform Veinripper to control uptime for tanks. When set to 0, proc rate is not affected unless position=front, in which case 0.4 is used.
+    /// Modifier for Cruciform Veinripper to control uptime. When set to 0, proc rate is not affected.
     double cruciform_veinripper_proc_rate = 0.0;
+    /// Modifier for Cruciform Veinripper to control uptime for tanks. When set to 0, proc rate is not affected unless position=front, in which case 0.4 is used.
+    double cruciform_veinripper_in_front_rate = 0.0;
     /// How many pustules to generate during pre-combat, as events before the pull will normally remove a few
     unsigned int precombat_pustules = 9;
     // Prevents Soul Ignite from being used a second time to trigger the
@@ -460,6 +463,10 @@ struct sim_t : private sc_thread_t
     timespan_t first_strike_period = 5_s;
     // Expected uptime of Adaptive Armor Fragment
     double adaptive_armor_fragment_uptime = 0.5;
+    /// Percentage of default duration for Soothing Shade.
+    double soothing_shade_duration_multiplier = 1.0;
+    // Time in seconds before prepull to use Jotungeirr
+    timespan_t jotungeirr_prepull_seconds = 0_s;    
   } shadowlands_opts;
 
   // Auras and De-Buffs
@@ -543,6 +550,7 @@ struct sim_t : private sc_thread_t
   bool enable_dps_healing;
   bool count_overheal_as_heal;
   double scaling_normalized;
+  bool merge_enemy_priority_dmg;
 
   // Multi-Threading
   mutex_t merge_mutex;

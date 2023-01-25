@@ -1437,11 +1437,8 @@ std::ostringstream& spell_info::effect_to_str( const dbc_t& dbc,
     s << " | AP Coefficient: " << tmp_buffer.data();
   }
 
-  if ( e -> pvp_coeff() != 0 )
-  {
-    snprintf( tmp_buffer.data(), tmp_buffer.size(), "%.5f", e -> pvp_coeff() );
-    s << " | PvP Coefficient: " << tmp_buffer.data();
-  }
+  snprintf( tmp_buffer.data(), tmp_buffer.size(), "%.5f", e -> pvp_coeff() );
+  s << " | PvP Coefficient: " << tmp_buffer.data();
 
   if ( e -> chain_target() != 0 )
     s << " | Chain Multiplier: " << e -> chain_multiplier();
@@ -2011,6 +2008,30 @@ std::string spell_info::to_str( const dbc_t& dbc, const spell_data_t* spell, int
           s << "Itemlevel multiplier [base=" << modifier.type << "], ";
           has_modifiers = true;
           break;
+        case RPPM_MODIFIER_CLASS_MASK:
+        {
+          if ( !has_modifiers )
+          {
+            s << " (";
+          }
+
+          std::streamsize decimals = 3;
+          double rppm_val = spell->real_ppm() * ( 1.0 + modifier.coefficient );
+          if ( rppm_val >= 10 )
+            decimals += 2;
+          else if ( rppm_val >= 1 )
+            decimals += 1;
+          s.precision( decimals );
+          for ( unsigned int i = 1; i < std::size( _class_map ); i++ )
+          {
+            if ( ( modifier.type & ( 1 << ( i - 1 ) ) ) && _class_map[ i ].name )
+            {
+              s << _class_map[ i ].name << ": " << rppm_val << ", ";
+            }
+          }
+          has_modifiers = true;
+          break;
+        }
         case RPPM_MODIFIER_SPEC:
         {
           if ( !has_modifiers )

@@ -1375,6 +1375,7 @@ void inscrutable_quantum_device ( special_effect_t& effect )
       bonus_buffs.clear();
 
       bonus_buffs.push_back( player->buffs.bloodlust );
+      bonus_buffs.push_back( player->buffs.forced_bloodlust );
 
       if ( player->type == MAGE )
       {
@@ -2051,7 +2052,7 @@ void soul_cage_fragment( special_effect_t& effect )
   auto buff = debug_cast<stat_buff_t*>( buff_t::find( effect.player, "torturous_might" ) );
   if ( !buff )
   {
-    buff = make_buff<stat_buff_t>( effect.player, "torturous_might", effect.player->find_spell( 357672 ) )
+    buff = make_buff<stat_buff_t>( effect.player, "torturous_might", effect.driver()->effectN( 1 ).trigger() )
            ->add_stat( effect.player->convert_hybrid_stat( STAT_STR_AGI_INT ), effect.driver()->effectN( 1 ).average( effect.item ) );
 
     effect.custom_buff = buff;
@@ -2162,6 +2163,53 @@ void old_warriors_soul( special_effect_t& effect )
                             [ buff ]() { buff->trigger(); } );
     } );
   }
+}
+	
+/**Whispering Shard of Power
+ * id=357185 Stat buffs
+ * id=355319 periodic roll for proc & coefficients for stat amounts & Driver
+ */
+void whispering_shard_of_power( special_effect_t& effect )
+{
+  if ( unique_gear::create_fallback_buffs(
+     effect, { "strength_in_fealty_crit_rating", "strength_in_fealty_mastery_rating", "strength_in_fealty_haste_rating",
+                  "strength_in_fealty_versatility_rating" } ) )
+  return;
+  // When selecting the highest stat, the priority of equal secondary stats is Vers > Mastery > Haste > Crit.
+  static constexpr std::array<stat_e, 4> ratings = { STAT_VERSATILITY_RATING, STAT_MASTERY_RATING, STAT_HASTE_RATING,
+                                                     STAT_CRIT_RATING };
+
+  // Use a separate buff for each rating type so that individual uptimes are reported nicely and APLs can easily
+  // reference them. Store these in pointers to reduce the size of the events that use them.
+  auto fealty_buffs = std::make_shared<std::map<stat_e, buff_t*>>();
+  double amount     = effect.driver()->effectN( 1 ).average( effect.item );
+
+  for ( auto stat : ratings )
+  {
+    auto name    = std::string( "strength_in_fealty_" ) + util::stat_type_string( stat );
+    buff_t* buff = buff_t::find( effect.player, name );
+
+    if ( !buff )
+    {
+      buff = make_buff<stat_buff_t>( effect.player, name, effect.player->find_spell( 357185 ), effect.item )
+                 ->add_stat( stat, amount );
+    }
+    ( *fealty_buffs )[ stat ] = buff;
+  }
+
+  effect.player->register_combat_begin( [ &effect, fealty_buffs ]( player_t* ) {
+    timespan_t period = effect.player->find_spell( 355319 )->effectN( 1 ).period();
+    // Proc chance appears to be 5% per roll based on testing and logs. 21-8-2022 
+    double chance     = 0.05;
+
+    make_repeating_event( effect.player->sim, period, [ &effect, chance, fealty_buffs ]() {
+      if ( effect.player->rng().roll( chance ) )
+      {
+        stat_e max_stat = util::highest_stat( effect.player, ratings );
+        ( *fealty_buffs )[ max_stat ]->trigger();
+      }
+    } );
+  } );
 }
 
 void salvaged_fusion_amplifier( special_effect_t& effect)
@@ -2803,6 +2851,7 @@ void soleahs_secret_technique( special_effect_t& effect )
 {
   // Assuming you don't actually use this trinket during combat but rather beforehand
   effect.type = SPECIAL_EFFECT_EQUIP;
+  effect.cooldown_ = 0_s;
 
   std::string_view opt_str = effect.player->sim->shadowlands_opts.soleahs_secret_technique_type;
   // Override with player option if defined
@@ -3225,6 +3274,8 @@ void architects_ingenuity_core( special_effect_t& effect )
   };
 
   effect.execute_action = create_proc_action<architects_ingenuity_t>( "architects_ingenuity", effect );
+  effect.cooldown_group_name_override = "item_cd_1141_gcd";
+  effect.cooldown_group_duration_override = effect.driver()->gcd();
 }
 
 // TODO: extremely annoying to do as none of these things show up on the combat log
@@ -3603,6 +3654,8 @@ void grim_eclipse( special_effect_t& effect )
       // Use data().duration() here so that if you alter dot_duration the tick value is not changed
       tick_action->base_dd_min = tick_action->base_dd_max =
           e.driver()->effectN( 1 ).average( e.item ) / data().duration().total_seconds();
+      // damage effect has a radius so we need to override being auto-parsed as an aoe spell
+      tick_action->aoe = 0;
 
       buff->add_stat( STAT_HASTE_RATING, e.driver()->effectN( 2 ).average( e.item ) );
       base_duration = buff->buff_duration();
@@ -3702,7 +3755,7 @@ void pulsating_riftshard( special_effect_t& effect )
 // 368653 wand damage proc
 void cache_of_acquired_treasures( special_effect_t& effect )
 {
-  if ( unique_gear::create_fallback_buffs( effect, { "acquired_sword", "acquired_axe", "acquired_wand", "acquired_sword_haste" } ) )
+  if ( unique_gear::create_fallback_buffs( effect, { "acquired_sword", "acquired_axe", "acquired_axe_driver", "acquired_wand", "acquired_sword_haste" } ) )
     return;
 
   struct acquire_weapon_t : public proc_spell_t
@@ -3790,7 +3843,8 @@ void cache_of_acquired_treasures( special_effect_t& effect )
       cycle_period = effect.player->find_spell( 367804 )->effectN( 1 ).period();
 
       auto cycle_weapon = [ this ]( int cycles ) {
-        if ( cooldown->up() )
+        // As of 9.2.5 the Sword buff is triggered in the cycle prior coming off cooldown, rather than after
+        if ( cooldown->remains() < cycle_period )
         {
           weapons.front()->expire();
           std::rotate( weapons.begin(), weapons.begin() + cycles, weapons.end() );
@@ -4281,6 +4335,60 @@ void yasahm_the_riftbreaker( special_effect_t& effect )
 // TODO: Add proc restrictions to match the weapons or expansion options.
 void cruciform_veinripper(special_effect_t& effect)
 {
+  struct cruciform_veinripper_cb_t : public dbc_proc_callback_t
+  {
+    double proc_modifier_override;
+    double proc_modifier_in_front_override;
+
+    cruciform_veinripper_cb_t( const special_effect_t& effect ) : dbc_proc_callback_t( effect.player, effect ),
+      proc_modifier_override( effect.player->sim->shadowlands_opts.cruciform_veinripper_proc_rate ),
+      proc_modifier_in_front_override( effect.player->sim->shadowlands_opts.cruciform_veinripper_in_front_rate )
+    {
+    }
+
+    void trigger( action_t* a, action_state_t* s ) override
+    {
+      assert( rppm );
+      assert( s->target );
+      
+      double proc_modifier = 1.0;
+      if ( proc_modifier_override > 0.0 )
+      {
+        proc_modifier = proc_modifier_override;
+      }
+      else if( s->target->is_boss() )
+      {
+        // CC'd/Snared mobs appear to take the full proc rate, which does not work on bosses
+        // The "from behind" rate is roughly half the CC'd target rate in the spell data
+        proc_modifier = 0.5;
+        if ( a->player->position() == POSITION_FRONT )
+        {
+          if ( proc_modifier_in_front_override > 0.0 )
+          {
+            proc_modifier *= proc_modifier_in_front_override;
+          }
+          else
+          {
+            // Generalize default tank "behind boss" time as ~40% when no manual modifier is specified
+            // This does not proc from the front at all, but tanks are always position front for sims
+            //
+            // When the role is not tank, this is explicitly set to 0 to allow DPS to model bosses where
+            // they can't hit from behind.
+            proc_modifier *= a->player->primary_role() == ROLE_TANK ? 0.4 : 0.0;
+          }
+        }
+      }
+
+      if ( proc_modifier != rppm->get_modifier() )
+      {
+        effect.player->sim->print_debug( "Player {} (position: {}, role: {}) adjusts {} rppm modifer: old={} new={}",
+                                         *a->player, a->player->position(), a->player->primary_role(), effect, rppm->get_modifier(), proc_modifier);
+        rppm->set_modifier( proc_modifier );
+      }
+
+      dbc_proc_callback_t::trigger( a, s );
+    }
+  };
 
   struct sadistic_glee_t : public proc_spell_t
   {
@@ -4304,54 +4412,166 @@ void cruciform_veinripper(special_effect_t& effect)
   if (!sadistic_glee)
     effect.execute_action = create_proc_action<sadistic_glee_t>("sadistic_glee", effect);
   else
-    sadistic_glee->scaled_dmg += effect.driver()->effectN(1).average(effect.item);
+    sadistic_glee->scaled_dmg += effect.driver()->effectN( 1 ).average( effect.item );
 
-  effect.spell_id = 357588;
-  /* apparently due to proc rate being lower than reported in spell data (?) - emallson */
-  effect.rppm_modifier_ = 0.5;
+  effect.spell_id = effect.driver()->effectN( 1 ).trigger_spell_id();
 
-
-  /* override proc rate for tanks (40% of regular proc rate unless option is
-     set), and allow override via expansion option */
-  auto proc_option = effect.player->sim->shadowlands_opts.cruciform_veinripper_proc_rate;
-  if (proc_option == 0.0 && effect.player->position() == POSITION_FRONT) {
-    effect.rppm_modifier_ *= 0.4;
-  } else if(proc_option > 0.0) {
-    effect.rppm_modifier_ *= proc_option;
-  }
-
-  new dbc_proc_callback_t(effect.player, effect);
+  new cruciform_veinripper_cb_t( effect );
 }
+	
+void jotungeirr_destinys_call(special_effect_t& effect)
+{
+    for (auto a : effect.player->action_list)
+    {
+        if (a->action_list && a->action_list->name_str == "precombat" && a->name_str == "use_item_" + effect.item->name_str)
+        {
+            a->harmful = false;  // pass down harmful to allow action_t::init() precombat check bypass
+            break;
+        }
+    }
+
+    effect.player->register_combat_begin([effect](player_t*) {
+        auto precombat_seconds = effect.player->sim->shadowlands_opts.jotungeirr_prepull_seconds;
+        if (precombat_seconds > 0_s)
+        {
+            auto buff = static_cast<stat_buff_t*>(buff_t::find(effect.player, "burden_of_divinity"));
+            buff->extend_duration(effect.player, -1 * precombat_seconds);
+            effect.player->get_cooldown("item_cd_1141")->adjust(-1 * precombat_seconds, false);
+        }
+    });
+
+}
+	
+
+struct singularity_supreme_t : public stat_buff_t
+{
+  stat_buff_t* supremacy_buff;
+  buff_t* lockout;
+  stat_buff_t* swap_stat_compensation;
+
+  singularity_supreme_t( player_t* p, const item_t* i )
+    : stat_buff_t( p, "singularity_supreme_counter", p->find_spell( 368845 ), i )
+  {
+    lockout = buff_t::find( p, "singularity_supreme_lockout" );
+    if ( !lockout )
+    {
+      lockout = make_buff( p, "singularity_supreme_lockout", p->find_spell( 368865 ) )
+                    ->set_quiet( true )
+                    ->set_can_cancel( false );
+    }
+
+    supremacy_buff = dynamic_cast<stat_buff_t*>( buff_t::find( p, "singularity_supreme" ) );
+    if ( !supremacy_buff )
+    {
+      supremacy_buff = make_buff<stat_buff_t>( p, "singularity_supreme", p->find_spell( 368863 ), i );
+      supremacy_buff->set_can_cancel( false );
+    }
+
+    swap_stat_compensation = dynamic_cast<stat_buff_t*>( buff_t::find( p, "swap_stat_compensation" ) );
+
+    if ( !swap_stat_compensation )
+    {
+      swap_stat_compensation = make_buff<stat_buff_t>( p, "swap_stat_compensation" );
+      swap_stat_compensation->set_name_reporting( "antumbra_swapped_with_other_weapon" );
+      swap_stat_compensation->set_duration( 0_s )->set_can_cancel( false );
+    }
+
+    if ( p->antumbra.swap )
+    {
+      swap_stat_compensation->stats.clear();
+      if ( p->antumbra.int_diff != 0.0 )
+        swap_stat_compensation->add_stat( STAT_INTELLECT, p->antumbra.int_diff );
+      if ( p->antumbra.crit_diff != 0.0 )
+        swap_stat_compensation->add_stat( STAT_CRIT_RATING, p->antumbra.crit_diff );
+      if ( p->antumbra.haste_diff != 0.0 )
+        swap_stat_compensation->add_stat( STAT_HASTE_RATING, p->antumbra.haste_diff );
+      if ( p->antumbra.vers_diff != 0.0 )
+        swap_stat_compensation->add_stat( STAT_VERSATILITY_RATING, p->antumbra.vers_diff );
+      if ( p->antumbra.mastery_diff != 0.0 )
+        swap_stat_compensation->add_stat( STAT_MASTERY_RATING, p->antumbra.mastery_diff );
+      if ( p->antumbra.stam_diff != 0.0 )
+        swap_stat_compensation->add_stat( STAT_STAMINA, p->antumbra.stam_diff );
+    }
+
+    set_expire_at_max_stack( true );
+    set_stack_change_callback( [ this ]( buff_t* b, int, int ) {
+      if ( b->at_max_stacks() )
+      {
+        lockout->trigger();
+        supremacy_buff->trigger();
+      }
+    } );
+  }
+};
 
 void singularity_supreme( special_effect_t& effect )
 {
-  auto lockout = make_buff( effect.player, "singularity_supreme_lockout", effect.player->find_spell( 368865 ) )
-    ->set_quiet( true );
 
-  auto buff =
-      make_buff<stat_buff_t>( effect.player, "singularity_supreme", effect.player->find_spell( 368863 ), effect.item );
+  if ( unique_gear::create_fallback_buffs(
+           effect, { "singularity_supreme_counter", "singularity_supreme_lockout", "singularity_supreme", "swap_stat_compensation" } ) )
+      return;
 
-  // despite spell data proc flags, logs seem to show it only procs on damage spell casts
+  // logs seem to show it only procs on damage spell casts
   effect.proc_flags2_ = PF2_CAST_DAMAGE;
-  effect.custom_buff =
-      make_buff<stat_buff_t>( effect.player, "singularity_supreme_counter", effect.player->find_spell( 368845 ), effect.item )
-          ->set_expire_at_max_stack( true )
-          ->set_stack_change_callback( [ lockout, buff ]( buff_t* b, int, int ) {
-            if ( b->at_max_stacks() )
-            {
-              lockout->trigger();
-              buff->trigger();
-            }
-          } );
+
+  auto singularity_buff = new singularity_supreme_t( effect.player, effect.item );
+
+  effect.custom_buff = singularity_buff;
 
   new dbc_proc_callback_t( effect.player, effect );
 
   effect.player->callbacks.register_callback_trigger_function(
       effect.driver()->id(), dbc_proc_callback_t::trigger_fn_type::CONDITION,
-      [ lockout ]( const dbc_proc_callback_t*, action_t*, action_state_t* ) {
-        return !lockout->check();
+      [ singularity_buff ]( const dbc_proc_callback_t*, action_t*, action_state_t* ) {
+        return !singularity_buff->swap_stat_compensation->check() && !singularity_buff->lockout->check();
       } );
 }
+
+// Action to weapon swap Antumbra
+struct antumbra_swap_t : public action_t
+{
+  singularity_supreme_t* singularity_buff;
+
+  antumbra_swap_t( player_t* p, util::string_view opt ) : action_t( ACTION_OTHER, "antumbra_swap", p )
+  {
+    parse_options( opt );
+    trigger_gcd           = 1500_ms;
+    gcd_type              = gcd_haste_type::NONE;
+    harmful               = false;
+    ignore_false_positive = true;
+  }
+
+  void init_finished() override
+  {
+    action_t::init_finished();
+    singularity_buff = dynamic_cast<singularity_supreme_t*>( buff_t::find( player, "singularity_supreme_counter" ) );
+  }
+
+  void execute() override
+  {
+    if ( !singularity_buff || !player->antumbra.swap )
+      return;
+
+    if ( singularity_buff->swap_stat_compensation->check() )
+    {
+      singularity_buff->swap_stat_compensation->cancel();
+    }
+    else
+    {
+      singularity_buff->swap_stat_compensation->trigger();
+      singularity_buff->supremacy_buff->cancel();
+      singularity_buff->cancel();
+    }
+  }
+
+  bool ready() override
+  {
+    if ( !singularity_buff || !player->antumbra.swap )
+      return false;
+
+    return action_t::ready();
+  }
+};
 
 /** Gavel of the First Arbiter
   367953 driver
@@ -4672,6 +4892,8 @@ void gavel_of_the_first_arbiter( special_effect_t& effect )
 
   effect.type           = SPECIAL_EFFECT_USE;
   effect.execute_action = create_proc_action<twisted_judgment_t>( "twisted_judgment", effect );
+  effect.cooldown_group_name_override = "item_cd_1141_gcd";
+  effect.cooldown_group_duration_override = effect.driver()->gcd();
 }
 
 // Armor
@@ -4810,8 +5032,8 @@ void soulwarped_seal_of_menethil( special_effect_t& effect )
       assert( rppm );
       assert( s->target );
 
-      // Below 70% HP, proc rate appears to be 2rppm
-      double mod = 0.150;
+      // Below 70% HP, proc rate appears to be 4rppm
+      double mod = 0.2;
 	  
       // Above 70% HP, proc rate appears to be the full 20rppm.
       if ( s -> target -> health_percentage() >= 70 )
@@ -5933,7 +6155,50 @@ void hack_and_gore( special_effect_t& effect )
 
   new dbc_proc_callback_t( effect.player, effect );
 }
+
+void ripped_secrets( special_effect_t& effect )
+{
+
 }
+
+void branding_blade( special_effect_t& effect )
+{
+  auto ripped      = new special_effect_t( effect.player );
+  ripped->type     = SPECIAL_EFFECT_EQUIP;
+  ripped->source   = SPECIAL_EFFECT_SOURCE_ITEM;
+  ripped->spell_id = 366757;
+  effect.player->special_effects.push_back( ripped );
+
+  auto ripped_dot =
+      create_proc_action<generic_proc_t>( "ripped_secrets", *ripped, "ripped_secrets", ripped->trigger() );
+  ripped_dot->base_td = ripped->driver()->effectN( 1 ).base_value();
+
+  ripped->execute_action = ripped_dot;
+
+  new dbc_proc_callback_t( effect.player, *ripped );
+
+  effect.player->callbacks.register_callback_trigger_function(
+      ripped->spell_id, dbc_proc_callback_t::trigger_fn_type::CONDITION,
+      []( const dbc_proc_callback_t*, action_t* a, action_state_t* ) {
+        return a->weapon && a->weapon->slot == SLOT_MAIN_HAND;
+      } );
+
+  auto branding_dam =
+      create_proc_action<generic_proc_t>( "branding_blade", effect, "branding_blade", effect.trigger() );
+  branding_dam->base_dd_min = branding_dam->base_dd_max = effect.driver()->effectN( 1 ).base_value();
+
+  effect.execute_action = branding_dam;
+
+  new dbc_proc_callback_t( effect.player, effect );
+
+  effect.player->callbacks.register_callback_trigger_function(
+      effect.spell_id, dbc_proc_callback_t::trigger_fn_type::CONDITION,
+      [ ripped_dot ]( const dbc_proc_callback_t*, action_t* a, action_state_t* s ) {
+        return a->weapon && a->weapon->slot == SLOT_OFF_HAND && s->target &&
+               ripped_dot->get_dot( s->target )->is_ticking();
+      } );
+}
+}  // namespace set_bonus
 
 void register_hotfixes()
 {
@@ -5962,6 +6227,9 @@ void register_special_effects()
 
     // Set Bonus
     unique_gear::register_special_effect( 337893, set_bonus::hack_and_gore );
+    //as current set bonus parsing can only handle one spell per bonus, both effects are handled in branding_blade
+    //unique_gear::register_special_effect( 366757, set_bonus::ripped_secrets );
+    unique_gear::register_special_effect( 366876, set_bonus::branding_blade );
 
     // Trinkets
     unique_gear::register_special_effect( 347047, items::darkmoon_deck_putrescence );
@@ -6016,6 +6284,7 @@ void register_special_effects()
     unique_gear::register_special_effect( 355323, items::decanter_of_endless_howling );
     unique_gear::register_special_effect( 355324, items::tormentors_rack_fragment );
     unique_gear::register_special_effect( 355297, items::old_warriors_soul );
+    unique_gear::register_special_effect( 355319, items::whispering_shard_of_power, true );
     unique_gear::register_special_effect( 355333, items::salvaged_fusion_amplifier );
     unique_gear::register_special_effect( 355313, items::titanic_ocular_gland );
     unique_gear::register_special_effect( 355327, items::ebonsoul_vise );
@@ -6058,9 +6327,10 @@ void register_special_effects()
     unique_gear::register_special_effect( 358571, items::jaithys_the_prison_blade_5 );
     unique_gear::register_special_effect( 351527, items::yasahm_the_riftbreaker );
     unique_gear::register_special_effect( 359168, items::cruciform_veinripper );
-
+    unique_gear::register_special_effect(357773, items::jotungeirr_destinys_call);
+	
     // 9.2 Weapons
-    unique_gear::register_special_effect( 367952, items::singularity_supreme );
+    unique_gear::register_special_effect( 367952, items::singularity_supreme, true );
     unique_gear::register_special_effect( 367953, items::gavel_of_the_first_arbiter );
 
     // Armor
@@ -6126,8 +6396,9 @@ void register_special_effects()
 
 action_t* create_action( player_t* player, util::string_view name, util::string_view options )
 {
-  if ( util::str_compare_ci( name, "break_chains_of_domination" ) ) return new items::break_chains_of_domination_t( player, options );
-
+  if ( util::str_compare_ci( name, "break_chains_of_domination" ) )  return new items::break_chains_of_domination_t( player, options );
+  if ( util::str_compare_ci( name, "antumbra_swap" ) )               return new items::antumbra_swap_t( player, options );
+  
   return nullptr;
 }
 

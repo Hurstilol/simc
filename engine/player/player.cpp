@@ -2005,7 +2005,7 @@ void player_t::create_special_effects()
     }
   }
 
-  if ( sim->fight_style == "DungeonRoute" )
+  if ( sim->fight_style == FIGHT_STYLE_DUNGEON_ROUTE )
   {
     special_effect_t effect( this );
 
@@ -3128,7 +3128,7 @@ void player_t::add_precombat_buff_state( buff_t* buff, int stacks, double value,
   if ( !buff->allow_precombat )
     throw std::invalid_argument( fmt::format( "Invalid buff for 'override.precombat_state' option. Precombat states for '{}' are disabled.", buff->name_str ) );
 
-  register_combat_begin( [ buff, stacks, value, duration ] ( player_t* ) { buff->execute( stacks, value, duration ); } );
+  register_precombat_begin( [ buff, stacks, value, duration ] ( player_t* ) { buff->execute( stacks, value, duration ); } );
 }
 
 void player_t::add_precombat_cooldown_state( cooldown_t* cd, timespan_t duration )
@@ -3142,7 +3142,7 @@ void player_t::add_precombat_cooldown_state( cooldown_t* cd, timespan_t duration
   if ( action->cooldown != cd )
     action = nullptr;
 
-  register_combat_begin( [ cd, action, duration ] ( player_t* ) { cd->start( action, duration ); } );
+  register_precombat_begin( [ cd, action, duration ] ( player_t* ) { cd->start( action, duration ); } );
 }
 
 /// Called in every action constructor for all actions constructred for a player
@@ -3455,6 +3455,11 @@ void player_t::create_buffs()
         ->set_pct_buff_type( STAT_PCT_BUFF_VERSATILITY )
         ->set_pct_buff_type( STAT_PCT_BUFF_CRIT );
 
+      buffs.forced_bloodlust  = make_buff( this, "forced_bloodlust", find_spell( 2825 ) )
+          ->set_max_stack( 1 )
+          ->set_default_value_from_effect_type( A_HASTE_ALL )
+          ->add_invalidate( CACHE_HASTE );
+
       // 9.2 Encrypted Affix Buffs
       auto urh_restoration = find_spell( 368494 );
       buffs.decrypted_urh_cypher = make_buff( this, "decrypted_urh_cypher", find_spell( 368239 ) );
@@ -3466,16 +3471,21 @@ void player_t::create_buffs()
       } );
       buffs.decrypted_urh_cypher->set_stack_change_callback( [ this ]( buff_t* b, int, int new_ ) {
         double recharge_mult = 1.0 / ( 1.0 + b->data().effectN( 1 ).percent() );
+        int label = b->data().effectN( 1 ).misc_value1();
         for ( auto a : action_list )
         {
-          if ( a->cooldown->duration != 0_ms && a->data().class_mask() != 0 )
+          if ( a->cooldown->duration != 0_ms && a->data().affected_by_label( label ) )
           {
             if ( new_ == 1 )
-              a->base_recharge_multiplier *= recharge_mult;
+              a->dynamic_recharge_rate_multiplier *= recharge_mult;
             else
-              a->base_recharge_multiplier /= recharge_mult;
+              a->dynamic_recharge_rate_multiplier /= recharge_mult;
 
-            a->cooldown->adjust_recharge_multiplier();
+            if ( a->cooldown->action == a )
+              a->cooldown->adjust_recharge_multiplier();
+
+            if ( a->internal_cooldown->action == a )
+              a->internal_cooldown->adjust_recharge_multiplier();
           }
         }
       } );
@@ -3483,6 +3493,26 @@ void player_t::create_buffs()
       buffs.decrypted_vy_cypher = make_buff<stat_buff_t>( this, "decrypted_vy_cypher", find_spell( 368240 ) )
           ->set_default_value_from_effect( 1 )
           ->set_pct_buff_type( STAT_PCT_BUFF_HASTE );
+
+      // 9.2.5 M+ S4 Shrouded Affix Buffs
+      buffs.bounty_crit = make_buff( this, "bounty_crit", find_spell( 373108 ) )
+        ->set_constant_behavior( buff_constant_behavior::NEVER_CONSTANT )
+        ->set_default_value_from_effect_type( A_MOD_ALL_CRIT_CHANCE )
+        ->set_pct_buff_type( STAT_PCT_BUFF_CRIT )
+        ->set_period( 0_ms );
+      buffs.bounty_haste = make_buff( this, "bounty_haste", find_spell( 373113 ) )
+        ->set_constant_behavior( buff_constant_behavior::NEVER_CONSTANT )
+        ->set_default_value_from_effect_type( A_HASTE_ALL )
+        ->set_pct_buff_type( STAT_PCT_BUFF_HASTE )
+        ->set_period( 0_ms );
+      buffs.bounty_mastery = make_buff<stat_buff_t>( this, "bounty_mastery", find_spell( 373116 ) )
+        ->set_constant_behavior( buff_constant_behavior::NEVER_CONSTANT )
+        ->set_period( 0_ms );
+      buffs.bounty_vers = make_buff( this, "bounty_vers", find_spell( 373121 ) )
+        ->set_constant_behavior( buff_constant_behavior::NEVER_CONSTANT )
+        ->set_default_value_from_effect_type( A_MOD_VERSATILITY_PCT )
+        ->set_pct_buff_type( STAT_PCT_BUFF_VERSATILITY )
+        ->set_period( 0_ms );
     }
   }
   // .. for enemies
@@ -3622,6 +3652,9 @@ double player_t::composite_melee_haste() const
     if ( buffs.bloodlust->check() )
       h *= 1.0 / ( 1.0 + buffs.bloodlust->check_stack_value() );
 
+    if ( buffs.forced_bloodlust->check() )
+      h *= 1.0 / ( 1.0 + buffs.forced_bloodlust->check_stack_value() );
+
     if ( buffs.mongoose_mh && buffs.mongoose_mh->check() )
       h *= 1.0 / ( 1.0 + 30 / current.rating.attack_haste );
 
@@ -3718,7 +3751,28 @@ double player_t::composite_melee_attack_power_by_type( attack_power_type type ) 
       break;
   }
 
-  return ap;
+  // 2022-08-25 -- Recent logs have shown that player->auto_attack_modifier now works as a general AP modifier
+  //               This is normalized to AP based on weapon speed in a similar way as base weapon DPS above
+  double aa_bonus_ap = 0;
+  if ( auto_attack_modifier > 0 )
+  {
+    if ( type == attack_power_type::WEAPON_MAINHAND )
+    {
+      aa_bonus_ap = auto_attack_modifier / main_hand_weapon.swing_time.total_seconds();
+    }
+    else if ( type == attack_power_type::WEAPON_OFFHAND )
+    {
+      aa_bonus_ap = auto_attack_modifier / off_hand_weapon.swing_time.total_seconds();
+    }
+    else if ( type == attack_power_type::WEAPON_BOTH )
+    {
+      aa_bonus_ap = ( auto_attack_modifier / main_hand_weapon.swing_time.total_seconds()
+              + auto_attack_modifier / off_hand_weapon.swing_time.total_seconds() * 0.5 ) * ( 2.0 / 3.0 );
+    }
+    aa_bonus_ap *= WEAPON_POWER_COEFFICIENT;
+  }
+
+  return ap + aa_bonus_ap;
 }
 
 double player_t::composite_attack_power_multiplier() const
@@ -3967,6 +4021,9 @@ double player_t::composite_spell_haste() const
 
     if ( buffs.bloodlust->check() )
       h *= 1.0 / ( 1.0 + buffs.bloodlust->check_stack_value() );
+
+    if ( buffs.forced_bloodlust->check() )
+      h *= 1.0 / ( 1.0 + buffs.forced_bloodlust->check_stack_value() );
 
     if ( buffs.berserking->check() )
       h *= 1.0 / ( 1.0 + buffs.berserking->data().effectN( 1 ).percent() );
@@ -4834,6 +4891,12 @@ void player_t::combat_begin()
 
   init_resources( true );
 
+  // Trigger registered pre-pull functions
+  for ( const auto& f : precombat_begin_functions )
+  {
+    f( this );
+  }
+
   // Execute pre-combat actions
   if ( !is_pet() && !is_add() )
   {
@@ -4919,6 +4982,7 @@ void player_t::combat_begin()
   add_timed_buff_triggers( external_buffs.pact_of_the_soulstalkers, buffs.pact_of_the_soulstalkers );
   add_timed_buff_triggers( external_buffs.boon_of_azeroth, buffs.boon_of_azeroth );
   add_timed_buff_triggers( external_buffs.boon_of_azeroth_mythic, buffs.boon_of_azeroth_mythic );
+  add_timed_buff_triggers( external_buffs.forced_bloodlust, buffs.forced_bloodlust );
 
   auto add_timed_blessing_triggers = [ this, add_timed_buff_triggers ] ( const std::vector<timespan_t>& times, buff_t* buff, timespan_t duration = timespan_t::min() )
   {
@@ -7762,13 +7826,9 @@ struct shadowmeld_t : public racial_spell_t
     racial_spell_t::execute();
 
     player->buffs.shadowmeld->trigger();
-
+    
     // Shadowmeld stops autoattacks
-    if ( player->main_hand_attack && player->main_hand_attack->execute_event )
-      event_t::cancel( player->main_hand_attack->execute_event );
-
-    if ( player->off_hand_attack && player->off_hand_attack->execute_event )
-      event_t::cancel( player->off_hand_attack->execute_event );
+    player->cancel_auto_attacks();
   }
 };
 
@@ -10917,7 +10977,7 @@ std::unique_ptr<expr_t> player_t::create_expression( util::string_view expressio
     return covenant->create_expression( splits );
   }
 
-  if ( splits[ 0 ] == "rune_word" )
+  if ( splits[ 0 ] == "rune_word" || splits[ 0 ] == "hyperthread_wristwraps" )
   {
     return unique_gear::create_expression( *this, expression_str );
   }
@@ -11554,6 +11614,8 @@ void player_t::copy_from( player_t* source )
   temporary_enchant_str = source->temporary_enchant_str;
 
   external_buffs = source->external_buffs;
+
+  antumbra = source->antumbra;
 }
 
 void player_t::create_options()
@@ -11716,6 +11778,15 @@ void player_t::create_options()
   add_option( opt_bool( "infinite_runic", resources.infinite_resource[ RESOURCE_RUNIC_POWER ] ) );
   add_option( opt_bool( "infinite_astral_power", resources.infinite_resource[ RESOURCE_ASTRAL_POWER ] ) );
 
+  // Rygelon Dagger / Antumbra
+  add_option( opt_bool( "shadowlands.antumbra.swap", antumbra.swap ) );
+  add_option( opt_float( "shadowlands.antumbra.int_diff", antumbra.int_diff ) );
+  add_option( opt_float( "shadowlands.antumbra.crit_diff", antumbra.crit_diff ) );
+  add_option( opt_float( "shadowlands.antumbra.haste_diff", antumbra.haste_diff ) );
+  add_option( opt_float( "shadowlands.antumbra.mastery_diff", antumbra.mastery_diff ) );
+  add_option( opt_float( "shadowlands.antumbra.vers_diff", antumbra.vers_diff ) );
+  add_option( opt_float( "shadowlands.antumbra.stam_diff", antumbra.stam_diff ) );
+
   // Resources
   add_option( opt_func( "initial_resource", parse_initial_resource ) );
 
@@ -11776,6 +11847,7 @@ void player_t::create_options()
   add_option( opt_external_buff_times( "external_buffs.kindred_affinity", external_buffs.kindred_affinity ) ) ;
   add_option( opt_external_buff_times( "external_buffs.boon_of_azeroth", external_buffs.boon_of_azeroth ) );
   add_option( opt_external_buff_times( "external_buffs.boon_of_azeroth_mythic", external_buffs.boon_of_azeroth_mythic ) );
+  add_option( opt_external_buff_times( "external_buffs.forced_bloodlust", external_buffs.forced_bloodlust ) );
 
   // Additional Options for Timed External Buffs
   add_option( opt_bool( "external_buffs.seasons_of_plenty", external_buffs.seasons_of_plenty ) );
@@ -13214,6 +13286,27 @@ bool player_t::verify_use_items() const
 }
 
 /**
+ * Cancel the main hand (and off hand, if applicable) swing timer
+ */
+void player_t::cancel_auto_attacks()
+{
+  if ( main_hand_attack || off_hand_attack )
+  {
+    sim->print_debug( "Cancelling auto attack swings" );
+  }
+
+  if ( main_hand_attack && main_hand_attack->execute_event )
+  {
+    event_t::cancel( main_hand_attack->execute_event );
+  }
+
+  if ( off_hand_attack && off_hand_attack->execute_event )
+  {
+    event_t::cancel( off_hand_attack->execute_event );
+  }
+}
+
+/**
  * Reset the main hand (and off hand, if applicable) swing timer
  * Optionally delay by a set amount
  */
@@ -13405,6 +13498,11 @@ void player_t::register_combat_begin( buff_t* b )
   combat_begin_functions.emplace_back([ b ]( player_t* ) { b -> trigger(); } );
 }
 
+void player_t::register_precombat_begin( buff_t* b )
+{
+  precombat_begin_functions.emplace_back( [ b ]( player_t* ) { b->trigger(); } );
+}
+
 void player_t::register_combat_begin( action_t* a )
 {
   combat_begin_functions.emplace_back([ a ]( player_t* ) { a -> execute(); } );
@@ -13413,6 +13511,11 @@ void player_t::register_combat_begin( action_t* a )
 void player_t::register_combat_begin( const combat_begin_fn_t& fn )
 {
   combat_begin_functions.push_back( fn );
+}
+
+void player_t::register_precombat_begin( const combat_begin_fn_t& fn )
+{
+  precombat_begin_functions.push_back( fn );
 }
 
 void player_t::register_combat_begin( double amount, resource_e resource, gain_t* g )
@@ -13473,7 +13576,7 @@ bool player_t::is_active() const
     }
     else
     {
-      return sim->current_index == actor_index;
+      return sim->player_no_pet_list[ sim->current_index ] == this;
     }
   }
   else

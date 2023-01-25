@@ -562,6 +562,7 @@ public:
     cooldown_t* vampiric_blood;
     // Frost
     cooldown_t* icecap_icd; // internal cooldown that prevents several procs on the same dual-wield attack
+    cooldown_t* inexorable_assault_icd; // internal cooldown to prevent double procs
     cooldown_t* koltiras_favor_icd; // internal cooldown that prevents several procs on the same dual-wield sttack
     cooldown_t* pillar_of_frost;
     // Unholy
@@ -1067,6 +1068,7 @@ public:
     cooldown.dark_transformation      = get_cooldown( "dark_transformation" );
     cooldown.death_and_decay_dynamic  = get_cooldown( "death_and_decay" ); // Default value, changed during action construction
     cooldown.icecap_icd               = get_cooldown( "icecap" );
+    cooldown.inexorable_assault_icd   = get_cooldown( "inexorable_assault_icd" );
     cooldown.koltiras_favor_icd       = get_cooldown( "koltiras_favor_icd" );
     cooldown.pillar_of_frost          = get_cooldown( "pillar_of_frost" );
     cooldown.shackle_the_unworthy_icd = get_cooldown( "shackle_the_unworthy_icd" );
@@ -2349,6 +2351,9 @@ struct risen_skulker_pet_t : public death_knight_pet_t
 struct dancing_rune_weapon_pet_t : public death_knight_pet_t
 {
   target_specific_t<dot_t> blood_plague_dot;
+  // Main drw is the only one that can apply BP.  Technically speaking all spells are only cast from main DRW pet
+  // However, we allow all of the copies to cast thier own in simc for accounting purposes.
+  bool main_drw_guardian;
 
   dot_t* get_blood_plague( player_t* target )
   {
@@ -2396,7 +2401,19 @@ struct dancing_rune_weapon_pet_t : public death_knight_pet_t
     {
       aoe = -1;
       cooldown -> duration = 0_ms;
-      this -> impact_action = p -> ability.blood_plague;
+      // Only main guardian can apply the dot
+      if( p -> main_drw_guardian )
+        this -> impact_action = p -> ability.blood_plague;
+    }
+  };
+
+  struct consumption_t: public drw_action_t<melee_attack_t>
+  {
+    consumption_t( dancing_rune_weapon_pet_t* p ) :
+      drw_action_t( p, "consumption", p -> dk() -> talent.consumption )
+    {
+      aoe = -1;
+      reduced_aoe_targets = data().effectN( 3 ).base_value();
     }
   };
 
@@ -2405,7 +2422,9 @@ struct dancing_rune_weapon_pet_t : public death_knight_pet_t
     deaths_caress_t( dancing_rune_weapon_pet_t* p ) :
       drw_action_t( p, "deaths_caress", p -> dk() -> spec.deaths_caress )
     {
-      this -> impact_action = p -> ability.blood_plague;
+      // Only main guardian can apply the dot
+      if ( p -> main_drw_guardian )
+        this -> impact_action = p -> ability.blood_plague;
     }
   };
 
@@ -2503,9 +2522,10 @@ struct dancing_rune_weapon_pet_t : public death_knight_pet_t
     drw_action_t<melee_attack_t>* death_strike;
     drw_action_t<melee_attack_t>* heart_strike;
     drw_action_t<melee_attack_t>* marrowrend;
+    drw_action_t<melee_attack_t>* consumption;
   } ability;
 
-  dancing_rune_weapon_pet_t( death_knight_t* owner, util::string_view drw_name ) :
+  dancing_rune_weapon_pet_t( death_knight_t* owner, util::string_view drw_name, bool main_drw_guardian ) :
     death_knight_pet_t( owner, drw_name, true, true ),
     blood_plague_dot( false ),
     ability()
@@ -2516,6 +2536,8 @@ struct dancing_rune_weapon_pet_t : public death_knight_pet_t
 
     owner_coeff.ap_from_ap = 1 / 3.0;
     resource_regeneration = regen_type::DISABLED;
+
+    this->main_drw_guardian = main_drw_guardian;
   }
 
 
@@ -2529,6 +2551,7 @@ struct dancing_rune_weapon_pet_t : public death_knight_pet_t
     ability.death_strike  = new death_strike_t ( this );
     ability.heart_strike  = new heart_strike_t ( this );
     ability.marrowrend    = new marrowrend_t   ( this );
+    ability.consumption   = new consumption_t  ( this );
   }
 
   void arise() override
@@ -3263,15 +3286,6 @@ struct virulent_plague_t : public death_knight_disease_t
 void death_knight_melee_attack_t::execute()
 {
   base_t::execute();
-
-  if ( triggers_icecap && p() -> talent.icecap -> ok() && hit_any_target &&
-       p() -> cooldown.icecap_icd -> is_ready() && execute_state -> result == RESULT_CRIT )
-  {
-    p() -> cooldown.pillar_of_frost -> adjust( timespan_t::from_seconds(
-      - p() -> talent.icecap -> effectN( 1 ).base_value() / 10.0 ) );
-
-    p() -> cooldown.icecap_icd -> start();
-  }
 }
 
 // death_knight_melee_attack_t::impact() ====================================
@@ -3287,6 +3301,15 @@ void death_knight_melee_attack_t::impact( action_state_t* state )
     // Razorice is executed after the attack that triggers it
     p() -> active_spells.runeforge_razorice -> set_target( state -> target );
     p() -> active_spells.runeforge_razorice -> schedule_execute();
+  }
+
+  if ( triggers_icecap && p() -> talent.icecap -> ok() &&
+       p() -> cooldown.icecap_icd -> is_ready() && state -> result == RESULT_CRIT )
+  {
+    p() -> cooldown.pillar_of_frost -> adjust( timespan_t::from_seconds(
+      - p() -> talent.icecap -> effectN( 1 ).base_value() / 10.0 ) );
+
+    p() -> cooldown.icecap_icd -> start();
   }
 }
 
@@ -4222,6 +4245,20 @@ struct consumption_t : public death_knight_melee_attack_t
   {
     death_knight_melee_attack_t::init();
     may_proc_bron = true;
+  }
+
+  void execute() override
+  {
+    death_knight_melee_attack_t::execute();
+
+    if ( p() -> buffs.dancing_rune_weapon -> up() )
+    {
+      p() -> pets.dancing_rune_weapon_pet -> ability.consumption -> execute_on_target( target );
+      if ( p() -> sets -> has_set_bonus( DEATH_KNIGHT_BLOOD, T28, B4 ) )
+      {
+        p() -> pets.endless_rune_waltz_pet -> ability.consumption -> execute_on_target( target );
+      }
+    }
   }
 };
 
@@ -5437,6 +5474,19 @@ struct frostscythe_t : public death_knight_melee_attack_t
     may_proc_bron = true;
   }
 
+  void impact( action_state_t* s ) override
+  {
+    death_knight_melee_attack_t::impact( s );
+
+    if ( p() -> buffs.inexorable_assault -> up() && p() -> cooldown.inexorable_assault_icd -> is_ready() )
+    {
+      inexorable_assault -> set_target( target );
+      inexorable_assault -> schedule_execute();
+      p() -> buffs.inexorable_assault -> decrement();
+      p() -> cooldown.inexorable_assault_icd -> start();
+    }
+  }
+
   void execute() override
   {
     death_knight_melee_attack_t::execute();
@@ -5452,13 +5502,6 @@ struct frostscythe_t : public death_knight_melee_attack_t
     }
 
     p() -> consume_killing_machine( p() -> procs.killing_machine_fsc );
-
-    if ( p() -> buffs.inexorable_assault -> up() )
-    {
-      inexorable_assault -> set_target( target );
-      inexorable_assault -> schedule_execute();
-      p() -> buffs.inexorable_assault -> decrement();
-    }
 
     // Frostscythe procs rime at half the chance of Obliterate
     p() -> buffs.rime -> trigger( 1, buff_t::DEFAULT_VALUE(), p() -> buffs.rime->manual_chance / 2.0 );
@@ -5528,6 +5571,9 @@ struct frost_strike_strike_t : public death_knight_melee_attack_t
     if ( p() -> buffs.eradicating_blow -> check() )
     {
       m *= 1.0 + ( p() -> buffs.eradicating_blow -> stack_value() );
+      // Arma - May 5 2022 - On 9.2.0 live and 9.2.5.43741 eradicating blow applies the stack value twice to the off hand only.
+      if( p() -> bugs && weapon->slot == SLOT_OFF_HAND )
+        m *= 1.0 + ( p() -> buffs.eradicating_blow -> stack_value() );
     }
 
     return m;
@@ -6111,6 +6157,7 @@ struct mind_freeze_t : public death_knight_spell_t
 struct obliterate_strike_t : public death_knight_melee_attack_t
 {
   int deaths_due_cleave_targets;
+  action_t* inexorable_assault;
   obliterate_strike_t( death_knight_t* p, util::string_view name,
                        weapon_t* w, const spell_data_t* s ) :
     death_knight_melee_attack_t( name, p, s )
@@ -6138,6 +6185,8 @@ struct obliterate_strike_t : public death_knight_melee_attack_t
     {
       base_multiplier *= 1.0 + p -> legendary.koltiras_favor -> effectN ( 2 ).percent();
     }
+
+    inexorable_assault = get_action<inexorable_assault_damage_t>( "inexorable_assault", p );
   }
 
   int n_targets() const override
@@ -6189,6 +6238,14 @@ struct obliterate_strike_t : public death_knight_melee_attack_t
     {
       p() -> buffs.deaths_due->trigger();
     }
+
+    if ( p() -> buffs.inexorable_assault -> up() && p() -> cooldown.inexorable_assault_icd -> is_ready() )
+    {
+      inexorable_assault -> set_target( target );
+      inexorable_assault -> schedule_execute();
+      p() -> buffs.inexorable_assault -> decrement();
+      p() -> cooldown.inexorable_assault_icd -> start();
+    }
   }
 
   void execute() override
@@ -6214,7 +6271,6 @@ struct obliterate_strike_t : public death_knight_melee_attack_t
 struct obliterate_t : public death_knight_melee_attack_t
 {
   obliterate_strike_t *mh, *oh, *km_mh, *km_oh;
-  action_t* inexorable_assault;
 
   obliterate_t( death_knight_t* p, util::string_view options_str = {} ) :
     death_knight_melee_attack_t( "obliterate", p, p -> spec.obliterate ),
@@ -6223,8 +6279,6 @@ struct obliterate_t : public death_knight_melee_attack_t
     parse_options( options_str );
     dual = true;
     triggers_shackle_the_unworthy = true;
-
-    inexorable_assault = get_action<inexorable_assault_damage_t>( "inexorable_assault", p );
 
     const spell_data_t* mh_data = p -> main_hand_weapon.group() == WEAPON_2H ? data().effectN( 4 ).trigger() : data().effectN( 2 ).trigger();
 
@@ -6296,13 +6350,6 @@ struct obliterate_t : public death_knight_melee_attack_t
           oh -> set_target( target );
           oh -> execute();
         }
-      }
-
-      if ( p() -> buffs.inexorable_assault -> up() )
-      {
-        inexorable_assault -> set_target( target );
-        inexorable_assault -> schedule_execute();
-        p() -> buffs.inexorable_assault -> decrement();
       }
 
       p() -> buffs.rime -> trigger();
@@ -6709,7 +6756,7 @@ struct scourge_strike_base_t : public death_knight_melee_attack_t
   {
     death_knight_melee_attack_t::execute();
 
-    if ( p() -> sets -> has_set_bonus( DEATH_KNIGHT_UNHOLY, T28, B2 ) )
+    if ( p() -> sets -> has_set_bonus( DEATH_KNIGHT_UNHOLY, T28, B2 ) && get_td( target ) -> debuff.festering_wound -> up() )
     {
       p() -> buffs.harvest_time_stack -> trigger();
 
@@ -6828,6 +6875,7 @@ struct soul_reaper_t : public death_knight_melee_attack_t
 
     triggers_shackle_the_unworthy = true;
     hasted_ticks = false;
+    dot_behavior = DOT_EXTEND;
   }
 
   // T28 constructor
@@ -6840,6 +6888,7 @@ struct soul_reaper_t : public death_knight_melee_attack_t
     triggers_shackle_the_unworthy = true;
     hasted_ticks = false;
     background = true;
+    dot_behavior = DOT_EXTEND;
   }
 
   double cost() const override
@@ -6876,7 +6925,84 @@ struct soul_reaper_t : public death_knight_melee_attack_t
       soul_reaper_execute -> execute();
     }
   }
+
+  // 6-28-22 In 9.2.5 a bug was introduced that causes soul reaper refreshes to add the remaining debuff duration to the refreshed duration
+  // if set procs SR with 3s remaining on the debuff, it adds 3s from the remaining, then the 5s it should. leading to an 11s debuff rather than 8s
+  timespan_t calculate_dot_refresh_duration( const dot_t* dot, timespan_t triggered_duration ) const override
+  {
+    timespan_t d = death_knight_melee_attack_t::calculate_dot_refresh_duration( dot, triggered_duration );
+
+    // only the t28 version is a background action
+    if ( p() -> bugs && background )
+    {
+      d = d + dot->remains();
+    }
+
+    return d;
+  }
 };
+
+// Soul Reaper Gavel ========================================================
+// Soul reaper action specifically to proc the T28 4 Piece when Gavel is equipped
+
+struct soul_reaper_gavel_t : public death_knight_melee_attack_t
+{
+  soul_reaper_gavel_t( death_knight_t* p, util::string_view options_str ) :
+    death_knight_melee_attack_t( "soul_reaper_gavel", p, p -> talent.soul_reaper )
+  {
+    parse_options( options_str );
+
+    cooldown -> duration = p -> find_spell( 367953 ) -> cooldown();
+    triggers_shackle_the_unworthy = true;
+  }
+
+  void init() override
+  {
+    death_knight_melee_attack_t::init();
+    may_proc_bron = true;
+  }
+  
+  void execute() override
+  {
+    death_knight_melee_attack_t::execute();
+    if( p() -> sets -> has_set_bonus( DEATH_KNIGHT_UNHOLY, T28, B4 ) )
+    p() -> buffs.harvest_time -> trigger();
+    
+    p() -> buffs.runic_corruption -> trigger();
+  }
+};
+
+// Soul Reaper Whispering Shard of Power ========================================================
+// Soul reaper action specifically to proc the T28 4 Piece when Whispering Shard of Power is equipped
+
+struct soul_reaper_shard_t : public death_knight_melee_attack_t
+{
+  soul_reaper_shard_t( death_knight_t* p, util::string_view options_str ) :
+    death_knight_melee_attack_t( "soul_reaper_shard", p, p -> talent.soul_reaper )
+  {
+    parse_options( options_str );
+
+    cooldown -> duration = 20_s;
+
+    triggers_shackle_the_unworthy = true;
+  }
+
+  void init() override
+  {
+    death_knight_melee_attack_t::init();
+    may_proc_bron = true;
+  }
+  
+  void execute() override
+  {
+    death_knight_melee_attack_t::execute();
+    if( p() -> sets -> has_set_bonus( DEATH_KNIGHT_UNHOLY, T28, B4 ) )
+    p() -> buffs.harvest_time -> trigger();
+    
+    p() -> buffs.runic_corruption -> trigger();
+  }
+};
+
 
 // Summon Gargoyle ==========================================================
 
@@ -7031,6 +7157,10 @@ struct tombstone_t : public death_knight_spell_t
     p() -> buffs.tombstone -> trigger( 1, shield * p() -> resources.max[ RESOURCE_HEALTH ] );
     p() -> buffs.bone_shield -> decrement( charges );
     p() -> cooldown.dancing_rune_weapon -> adjust( p() -> legendary.crimson_rune_weapon -> effectN( 1 ).time_value() * charges );
+    if ( p() -> talent.blood_tap -> ok() )
+    {
+      p() -> cooldown.blood_tap -> adjust( -1.0 * timespan_t::from_seconds( p() -> talent.blood_tap -> effectN( 2 ).base_value() ) * charges );
+    }
   }
 };
 
@@ -7721,6 +7851,8 @@ void runeforge::reanimated_shambler( special_effect_t& effect )
 
     void execute() override
     {
+      death_knight_spell_t::execute();
+
       p() -> procs.reanimated_shambler -> occur();
 
       p() -> pets.reanimated_shambler.spawn( 1 );
@@ -8353,6 +8485,8 @@ action_t* death_knight_t::create_action( util::string_view name, util::string_vi
   if ( name == "outbreak"                 ) return new outbreak_t                 ( this, options_str );
   if ( name == "scourge_strike"           ) return new scourge_strike_t           ( this, options_str );
   if ( name == "soul_reaper"              ) return new soul_reaper_t              ( this, options_str );
+  if ( name == "soul_reaper_gavel"        ) return new soul_reaper_gavel_t        ( this, options_str );
+  if ( name == "soul_reaper_shard"        ) return new soul_reaper_shard_t        ( this, options_str );
   if ( name == "summon_gargoyle"          ) return new summon_gargoyle_t          ( this, options_str );
   if ( name == "unholy_assault"           ) return new unholy_assault_t           ( this, options_str );
   if ( name == "unholy_blight"            ) return new unholy_blight_t            ( this, options_str );
@@ -8590,10 +8724,10 @@ void death_knight_t::create_pets()
   {
     if ( find_action( "dancing_rune_weapon" ) )
     {
-      pets.dancing_rune_weapon_pet = new pets::dancing_rune_weapon_pet_t( this, "dancing_rune_weapon" );
+      pets.dancing_rune_weapon_pet = new pets::dancing_rune_weapon_pet_t( this, "dancing_rune_weapon", true );
       if ( sets -> has_set_bonus( DEATH_KNIGHT_BLOOD, T28, B4 ) )
       {
-        pets.endless_rune_waltz_pet = new pets::dancing_rune_weapon_pet_t( this, "endless_rune_waltz_t28_4pc" );
+        pets.endless_rune_waltz_pet = new pets::dancing_rune_weapon_pet_t( this, "endless_rune_waltz_t28_4pc", false );
       }
     }
 
@@ -9058,6 +9192,10 @@ void death_knight_t::init_spells()
 
   if ( talent.icecap )
     cooldown.icecap_icd -> duration = talent.icecap -> internal_cooldown();
+
+  if ( talent.inexorable_assault )
+    cooldown.inexorable_assault_icd -> duration = find_spell( 253595 ) -> internal_cooldown();  // Inexorable Assault buff spell id
+
   if ( covenant.abomination_limb )
   {
     cooldown.abomination_limb -> duration = timespan_t::from_seconds( covenant.abomination_limb -> effectN ( 4 ).base_value() );

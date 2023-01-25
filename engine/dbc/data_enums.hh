@@ -39,7 +39,7 @@ enum rppm_modifier_type_e
 {
   RPPM_MODIFIER_HASTE = 1,
   RPPM_MODIFIER_CRIT,
-  RPPM_MODIFIER_UNK_FLAG,
+  RPPM_MODIFIER_CLASS_MASK,
   RPPM_MODIFIER_SPEC,
   RPPM_MODIFIER_UNK,
   RPPM_MODIFIER_ILEVEL,
@@ -61,6 +61,7 @@ enum item_bonus_type
   ITEM_BONUS_ADD_RANK  = 17, // Add artifact power rank to a specific trait
   ITEM_BONUS_ADD_ITEM_EFFECT = 23,
   ITEM_BONUS_MOD_ITEM_STAT = 25, // Modify item stat to type
+  ITEM_BONUS_ILEVEL_IN_PVP = 36,  // Item has a higher level in PvP context
 };
 
 enum proc_types

@@ -69,7 +69,7 @@ public:
     QComboBox* threads;
     QComboBox* process_priority;
     QComboBox* auto_save;
-    QComboBox* pvp_crit;
+    QComboBox* pvp_mode;
     QComboBox* armory_region;
     QComboBox* armory_spec;
     QComboBox* default_role;
@@ -77,7 +77,6 @@ public:
     QComboBox* update_check;
     QComboBox* boss_type;
     QComboBox* tank_dummy;
-    QComboBox* tmi_boss;
     QComboBox* tmi_window;
     QComboBox* show_etmi;
     QComboBox* debug;

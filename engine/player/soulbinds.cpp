@@ -720,7 +720,7 @@ void thrill_seeker( special_effect_t& effect )
   // DungeonSlice & DungeonRoute: 1/4 = 0.25
   if ( killing_blow_chance < 0 )
   {
-    if ( p->sim->fight_style == "DungeonSlice" || p->sim->fight_style == "DungeonRoute" )
+    if ( p->sim->fight_style == FIGHT_STYLE_DUNGEON_SLICE || p->sim->fight_style == FIGHT_STYLE_DUNGEON_ROUTE )
     {
       number_of_players = 4;
     }
@@ -753,9 +753,15 @@ void fatal_flaw( special_effect_t& effect )
 
 void soothing_shade( special_effect_t& effect )
 {
+  if ( effect.player->sim->shadowlands_opts.soothing_shade_duration_multiplier == 0.0 )
+    return;
+
   auto buff = buff_t::find( effect.player, "soothing_shade" );
   if ( !buff )
-    buff = make_buff<stat_buff_t>( effect.player, "soothing_shade", effect.player->find_spell( 336885 ) );
+  {
+    buff = make_buff<stat_buff_t>( effect.player, "soothing_shade", effect.player->find_spell( 336885 ) )
+      ->set_duration_multiplier( effect.player->sim->shadowlands_opts.soothing_shade_duration_multiplier );
+  }
 
   effect.custom_buff = buff;
 
@@ -1602,6 +1608,7 @@ void effusive_anima_accelerator( special_effect_t& effect )
           if ( !range::contains( affected_cooldowns, a->cooldown ) )
           {
             affected_cooldowns.push_back( a->cooldown );
+            a->add_child( this );
           }
         }
       }
@@ -1967,7 +1974,7 @@ void lead_by_example( special_effect_t& effect )
         case POSITION_BACK:
         case POSITION_FRONT:
           // For DungeonSlice, always assume two allies
-          if ( util::str_compare_ci( effect.player->sim->fight_style, "DungeonSlice" ) )
+          if ( effect.player->sim->fight_style == FIGHT_STYLE_DUNGEON_SLICE )
             allies_nearby = 2;
           else
             allies_nearby = 4;

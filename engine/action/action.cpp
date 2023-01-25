@@ -332,6 +332,8 @@ action_t::action_t( action_e ty, util::string_view token, player_t* p, const spe
     aoe(),
     dual(),
     callbacks( true ),
+    allow_class_ability_procs(),
+    not_a_proc(),
     special(),
     channeled(),
     sequence(),
@@ -1190,7 +1192,7 @@ double action_t::total_crit_bonus( const action_state_t* state ) const
   double crit_multiplier_buffed = crit_multiplier * composite_player_critical_multiplier( state );
 
   double base_crit_bonus = crit_bonus;
-  if ( sim->pvp_crit )
+  if ( sim->pvp_mode )
     base_crit_bonus += sim->pvp_rules->effectN( 3 ).percent();
 
   double damage_bonus = composite_crit_damage_bonus_multiplier() * composite_target_crit_damage_bonus_multiplier( state->target );
@@ -1920,10 +1922,19 @@ void action_t::assess_damage( result_amount_type type, action_state_t* state )
   // TODO: Should part of this move to assessing, priority_iteration_damage for example?
   if ( state->result_raw > 0 || result_is_miss( state->result ) )
   {
-    if ( state->target == sim->target )
+    if ( sim->fight_style == FIGHT_STYLE_DUNGEON_SLICE || sim->fight_style == FIGHT_STYLE_DUNGEON_ROUTE )
+    {
+      if ( state->target->is_boss() )
+      {
+        player->priority_iteration_dmg += state->result_amount;
+      }
+    }
+    else if ( state->target == sim->target ||
+              ( sim->merge_enemy_priority_dmg && state->target->is_enemy() && !state->target->is_pet() ) )
     {
       player->priority_iteration_dmg += state->result_amount;
     }
+
     record_data( state );
   }
 }
@@ -4639,7 +4650,7 @@ bool action_t::execute_targeting(action_t* action) const
 }
 
 // This returns a list of all targets currently in range.
-std::vector<player_t*> action_t::targets_in_range_list(
+std::vector<player_t*>& action_t::targets_in_range_list(
   std::vector<player_t*>& tl) const
 {
   size_t i = tl.size();

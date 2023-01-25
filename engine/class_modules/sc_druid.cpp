@@ -316,8 +316,9 @@ public:
     double time_spend_healing = 0.0;
 
     // Covenant options
-    double adaptive_swarm_jump_distance_min = 5.0;
-    double adaptive_swarm_jump_distance_max = 40.0;
+    double adaptive_swarm_jump_distance_melee = 5.0;
+    double adaptive_swarm_jump_distance_ranged = 25.0;
+    double adaptive_swarm_jump_distance_stddev = 1.0;
     unsigned adaptive_swarm_friendly_targets = 20;
     std::string adaptive_swarm_prepull_setup = "";
     double celestial_spirits_exceptional_chance = 0.85;
@@ -1976,15 +1977,7 @@ public:
 
   void schedule_execute( action_state_t* s = nullptr ) override
   {
-    if ( !check_form_restriction() )
-    {
-      if ( may_autounshift && ( form_mask & NO_FORM ) == NO_FORM )
-        p()->active.shift_to_caster->execute();
-      else if ( autoshift )
-        autoshift->execute();
-      else
-        assert( false && "Action executed in wrong form with no valid form to shift to!" );
-    }
+    check_autoshift();
 
     ab::schedule_execute( s );
   }
@@ -2033,8 +2026,8 @@ public:
     if ( p()->buff.ravenous_frenzy->elapsed( p()->sim->current_time() ) < 50_ms )
       return;
 
-    // trigger on non-free_cast or free_cast that requires you to actually cast
-    if ( !f || f == free_cast_e::APEX || f == free_cast_e::ONETHS )
+    // trigger on non-free_cast or free_cast that requires you to actually cast (or UFR)
+    if ( !f || f == free_cast_e::APEX || f == free_cast_e::ONETHS || f == free_cast_e::URSOCS )
       p()->buff.ravenous_frenzy->trigger();
   }
 
@@ -2131,9 +2124,31 @@ public:
     double val      = eff.percent();
     bool mastery    = p()->find_mastery_spell( p()->specialization() ) == s_data;
 
+    auto debug_message = [ & ]( std::string_view type ) {
+      if ( buff )
+      {
+        p()->sim->print_debug( "buff-effects: {} ({}) {} modified by {}%{} with buff {} ({})", ab::name(), ab::id, type,
+                               val * 100.0, mastery ? "+mastery" : "", buff->name(), buff->data().id() );
+      }
+      else if ( mastery && !f )
+      {
+        p()->sim->print_debug( "mastery-effects: {} ({}) {} modified by {}%+mastery from {} ({})", ab::name(), ab::id,
+                               type, val * 100.0, s_data->name_cstr(), s_data->id() );
+      }
+      else if ( f )
+      {
+        p()->sim->print_debug( "conditional-effects: {} ({}) {} modified by {}% with condition from {} ({})",
+                               ab::name(), ab::id, type, val * 100.0, s_data->name_cstr(), s_data->id() );
+      }
+      else
+      {
+        p()->sim->print_debug( "passive-effects: {} ({}) {} modified by {}% from {} ({})", ab::name(), ab::id, type,
+                               val * 100.0, s_data->name_cstr(), s_data->id() );
+      }
+    };
+
     // TODO: more robust logic around 'party' buffs with radius
-    if ( !( eff.type() == E_APPLY_AURA || eff.type() == E_APPLY_AREA_AURA_PARTY ) || eff.radius() )
-      return;
+    if ( !( eff.type() == E_APPLY_AURA || eff.type() == E_APPLY_AREA_AURA_PARTY ) || eff.radius() ) return;
 
     if ( i <= 5 )
       parse_spell_effects_mods( val, mastery, s_data, i, mods... );
@@ -2141,6 +2156,7 @@ public:
     if ( is_auto_attack && eff.subtype() == A_MOD_AUTO_ATTACK_PCT )
     {
       da_multiplier_buffeffects.emplace_back( buff, val );
+      debug_message( "auto attack" );
       return;
     }
 
@@ -2150,31 +2166,29 @@ public:
     if ( !mastery && !val )
       return;
 
-    std::string_view buffeffect_name;
-
     if ( eff.subtype() == A_ADD_PCT_MODIFIER || eff.subtype() == A_ADD_PCT_LABEL_MODIFIER )
     {
       switch ( eff.misc_value1() )
       {
         case P_GENERIC:
           da_multiplier_buffeffects.emplace_back( buff, val, use_stacks, mastery, f );
-          buffeffect_name = "direct damage";
+          debug_message( "direct damage" );
           break;
         case P_TICK_DAMAGE:
           ta_multiplier_buffeffects.emplace_back( buff, val, use_stacks, mastery, f );
-          buffeffect_name = "tick damage";
+          debug_message( "tick damage" );
           break;
         case P_CAST_TIME:
           execute_time_buffeffects.emplace_back( buff, val, use_stacks, false, f );
-          buffeffect_name = "cast time";
+          debug_message( "cast time" );
           break;
         case P_COOLDOWN:
           recharge_multiplier_buffeffects.emplace_back( buff, val, use_stacks, false, f );
-          buffeffect_name = "cooldown";
+          debug_message( "cooldown" );
           break;
         case P_RESOURCE_COST:
           cost_buffeffects.emplace_back( buff, val, use_stacks, false, f );
-          buffeffect_name = "cost";
+          debug_message( "cost" );
           break;
         default:
           return;
@@ -2183,27 +2197,11 @@ public:
     else if ( eff.subtype() == A_ADD_FLAT_MODIFIER && eff.misc_value1() == P_CRIT )
     {
       crit_chance_buffeffects.emplace_back( buff, val, use_stacks, false, f );
-      buffeffect_name = "crit chance";
+      debug_message( "crit chance" );
     }
     else
     {
       return;
-    }
-
-    if ( buff )
-    {
-      p()->sim->print_debug( "buff-effects: {} ({}) {} modified by {}%{} with buff {} ({})", ab::name(), ab::id,
-                             buffeffect_name, val * 100.0, mastery ? "+mastery" : "", buff->name(), buff->data().id() );
-    }
-    else if ( mastery && !f )
-    {
-      p()->sim->print_debug( "mastery-effects: {} ({}) {} modified by {}%+mastery from {} ({})", ab::name(), ab::id,
-                             buffeffect_name, val * 100.0, s_data->name_cstr(), s_data->id() );
-    }
-    else
-    {
-      p()->sim->print_debug( "conditional-effects: {} ({}) {} modified by {}% with condition from {} ({})", ab::name(),
-                             ab::id, buffeffect_name, val * 100.0, s_data->name_cstr(), s_data->id() );
     }
   }
 
@@ -2248,18 +2246,23 @@ public:
     parse_buff_effects<Ts...>( buff, 0U, 0U, true, mods... );
   }
 
-  void parse_conditional_effects( const spell_data_t* spell, bfun f )
+  void parse_conditional_effects( const spell_data_t* spell, bfun f, unsigned ignore_start = 0U, unsigned ignore_end = 0U )
   {
     if ( !spell || !spell->ok() )
       return;
 
     for ( size_t i = 1 ; i <= spell->effect_count(); i++ )
+    {
+      if ( ignore_start && i >= as<size_t>( ignore_start ) && ( i <= as<size_t>( ignore_end ) || !ignore_end ) )
+        continue;
+
       parse_buff_effect( nullptr, f, spell, i, false );
+    }
   }
 
-  void parse_passive_effects( const spell_data_t* spell )
+  void parse_passive_effects( const spell_data_t* spell, unsigned ignore_start = 0U, unsigned ignore_end = 0U )
   {
-    parse_conditional_effects( spell, nullptr );
+    parse_conditional_effects( spell, nullptr, ignore_start, ignore_end );
   }
 
   double get_buff_effects_value( const std::vector<buff_effect_t>& buffeffects, bool flat = false,
@@ -2351,7 +2354,9 @@ public:
     parse_buff_effects( p()->buff.cat_form );
     parse_buff_effects( p()->buff.incarnation_cat );
     parse_buff_effects( p()->buff.predatory_swiftness );
-    parse_buff_effects( p()->buff.savage_roar );
+    parse_conditional_effects( &p()->buff.savage_roar->data(), [ this ]() {
+      return p()->get_form() == form_e::CAT_FORM && p()->buff.savage_roar->check();
+    } );
     parse_buff_effects( p()->buff.apex_predators_craving );
 
     // Guardian
@@ -2369,6 +2374,8 @@ public:
     }
     parse_buff_effects( p()->buff.tooth_and_claw, false );
     parse_buff_effects<C>( p()->buff.savage_combatant, p()->conduit.savage_combatant );
+    // Auto attack bonus
+    parse_passive_effects( p()->spec.guardian, 1U, 10U );
 
     // Restoration
     parse_buff_effects( p()->buff.abundance );
@@ -2517,6 +2524,19 @@ public:
     return !form_mask || ( form_mask & p()->get_form() ) == p()->get_form() ||
            ( p()->specialization() == DRUID_GUARDIAN && p()->buff.bear_form->check() &&
              ab::data().affected_by( p()->buff.bear_form->data().effectN( 2 ) ) );
+  }
+
+  void check_autoshift()
+  {
+    if ( !check_form_restriction() )
+    {
+      if ( may_autounshift && ( form_mask & NO_FORM ) == NO_FORM )
+        p()->active.shift_to_caster->execute();
+      else if ( autoshift )
+        autoshift->execute();
+      else
+        assert( false && "Action executed in wrong form with no valid form to shift to!" );
+    }
   }
 
   bool verify_actor_spec() const override
@@ -3276,10 +3296,6 @@ public:
 
     if ( harmful )
     {
-      // Track benefit of damage buffs
-      p()->buff.tigers_fury->up();
-      p()->buff.savage_roar->up();
-
       if ( special && base_costs[ RESOURCE_ENERGY ] > 0 )
         p()->buff.incarnation_cat->up();
     }
@@ -5445,6 +5461,9 @@ struct barkskin_t : public druid_spell_t
 
   void execute() override
   {
+    // since barkskin can be used off gcd, it can bypass schedule_execute() so we check for autoshift with 4t28 here
+    check_autoshift();
+
     druid_spell_t::execute();
 
     if ( p()->talent.brambles->ok() )
@@ -6236,6 +6255,9 @@ struct prowl_t : public druid_spell_t
   {
     sim->print_log( "{} performs {}", player->name(), name() );
 
+    // since prowl can be used off gcd, it can bypass schedule_execute() so we check for autoshift again here
+    check_autoshift();
+
     p()->buff.jungle_stalker->expire();
     p()->buff.prowl->trigger();
 
@@ -6252,7 +6274,7 @@ struct prowl_t : public druid_spell_t
       if ( p()->buff.jungle_stalker->check() )
         return druid_spell_t::ready();
 
-      if ( p()->sim->fight_style == "DungeonSlice" && p()->player_t::buffs.shadowmeld->check() && target->type == ENEMY_ADD )
+      if ( p()->sim->fight_style == FIGHT_STYLE_DUNGEON_SLICE && p()->player_t::buffs.shadowmeld->check() && target->type == ENEMY_ADD )
         return druid_spell_t::ready();
 
       if ( p()->sim->target_non_sleeping_list.empty() )
@@ -7193,12 +7215,14 @@ struct adaptive_swarm_t : public druid_spell_t
 
   public:
     swarm_target_t swarm_target;
+    double range;
     int stacks;
     bool jump;
 
     adaptive_swarm_state_t( action_t* a, player_t* t )
       : action_state_t( a, t ),
         default_stacks( as<int>( debug_cast<druid_t*>( a->player )->cov.necrolord->effectN( 1 ).base_value() ) ),
+        range( 0.0 ),
         stacks( 0 ),
         jump( false )
     {}
@@ -7208,6 +7232,7 @@ struct adaptive_swarm_t : public druid_spell_t
       action_state_t::initialize();
 
       swarm_target = {};
+      range = 0.0;
       stacks = default_stacks;
       jump = false;
     }
@@ -7218,6 +7243,7 @@ struct adaptive_swarm_t : public druid_spell_t
       auto swarm_s = debug_cast<const adaptive_swarm_state_t*>( s );
 
       swarm_target = swarm_s->swarm_target;
+      range = swarm_s->range;
       stacks = swarm_s->stacks;
       jump = swarm_s->jump;
     }
@@ -7226,6 +7252,7 @@ struct adaptive_swarm_t : public druid_spell_t
     {
       action_state_t::debug_str( s );
 
+      s << " range=" << range;
       s << " swarm_stacks=" << stacks;
 
       if ( jump )
@@ -7268,13 +7295,10 @@ struct adaptive_swarm_t : public druid_spell_t
 
     timespan_t travel_time() const override
     {
-      if ( debug_cast<adaptive_swarm_state_t*>( execute_state )->jump )
-      {
-        auto dist =
-            rng().range( p()->options.adaptive_swarm_jump_distance_min, p()->options.adaptive_swarm_jump_distance_max );
+      auto s_ = state( execute_state );
 
-        return timespan_t::from_seconds( dist / travel_speed );
-      }
+      if ( s_->jump )
+        return timespan_t::from_seconds( s_->range / travel_speed );
 
       if ( target == player )
         return 0_ms;
@@ -7284,12 +7308,25 @@ struct adaptive_swarm_t : public druid_spell_t
 
     virtual swarm_target_t new_swarm_target( swarm_target_t = {} ) = 0;
 
-    void send_swarm( swarm_target_t swarm_target, int stack )
+    void send_swarm( swarm_target_t swarm_target, int stack, double range )
     {
       sim->print_debug( "ADAPTIVE_SWARM: jumping {} {} stacks to {}", stack, heal ? "heal" : "damage",
                         heal ? swarm_target.event ? "existing target" : "new target" : swarm_target.player->name() );
 
       auto new_state = state( get_state() );
+
+      // healing swarm get a new randomized ranged. damage swarms replicate the range of the preceding healing swarm.
+      if ( heal )
+      {
+        new_state->range = rng().roll( 0.5 ) ? rng().gauss( p()->options.adaptive_swarm_jump_distance_melee,
+                                                            p()->options.adaptive_swarm_jump_distance_stddev, true )
+                                             : rng().gauss( p()->options.adaptive_swarm_jump_distance_ranged,
+                                                            p()->options.adaptive_swarm_jump_distance_stddev, true );
+      }
+      else
+      {
+        new_state->range = range;
+      }
 
       new_state->stacks = stack;
       new_state->jump = true;
@@ -7299,7 +7336,7 @@ struct adaptive_swarm_t : public druid_spell_t
       schedule_execute( new_state );
     }
 
-    void jump_swarm( int s )
+    void jump_swarm( int s, double r )
     {
       auto stacks = s - 1;
 
@@ -7314,11 +7351,11 @@ struct adaptive_swarm_t : public druid_spell_t
       {
         new_target = new_swarm_target();
         assert( !new_target == false );
-        send_swarm( new_target, stacks );
+        send_swarm( new_target, stacks, r );
       }
       else
       {
-        other->send_swarm( new_target, stacks );
+        other->send_swarm( new_target, stacks, r );
       }
 
       if ( p()->legendary.unbridled_swarm->ok() &&
@@ -7330,12 +7367,12 @@ struct adaptive_swarm_t : public druid_spell_t
           second_target = new_swarm_target();
           assert( !second_target == false );
           sim->print_debug( "ADAPTIVE_SWARM: splitting off {} swarm", heal ? "heal" : "damage" );
-          send_swarm( second_target, stacks );
+          send_swarm( second_target, stacks, r );
         }
         else
         {
           sim->print_debug( "ADAPTIVE_SWARM: splitting off {} swarm", other->heal ? "heal" : "damage" );
-          other->send_swarm( second_target, stacks );
+          other->send_swarm( second_target, stacks, r );
         }
       }
     }
@@ -7357,6 +7394,12 @@ struct adaptive_swarm_t : public druid_spell_t
     swarm_target_t new_swarm_target( swarm_target_t exclude ) override
     {
       auto tl = target_list();
+
+      // because action_t::available_targets() explicitly adds the current action_t::target to the target_cache, we need
+      // to explicitly remove it here as swarm should not pick an invulnerable target whenignore_invulnerable_targets is
+      // enabled.
+      if ( sim->ignore_invulnerable_targets && target->debuffs.invulnerable->check() )
+        tl.erase( std::remove( tl.begin(), tl.end(), target ), tl.end() );
 
       if ( exclude.player )
         tl.erase( std::remove( tl.begin(), tl.end(), exclude.player ), tl.end() );
@@ -7426,7 +7469,7 @@ struct adaptive_swarm_t : public druid_spell_t
       if ( d->remains() > 0_ms && !d->target->is_sleeping() )
         return;
 
-      jump_swarm( d->current_stack() );
+      jump_swarm( d->current_stack(), state( d->state )->range );
     }
 
     double composite_persistent_multiplier( const action_state_t* s ) const override
@@ -7434,7 +7477,7 @@ struct adaptive_swarm_t : public druid_spell_t
       double pm = adaptive_swarm_base_t::composite_persistent_multiplier( s );
 
       // inherits from druid_spell_t so does not get automatic persistent multiplier parsing
-      if ( !state( s )->jump && p()->buff.tigers_fury->check() )
+      if ( !state( s )->jump && p()->buff.tigers_fury->up() )
         pm *= 1.0 + tf_mul;
 
       return pm;
@@ -7455,10 +7498,11 @@ struct adaptive_swarm_t : public druid_spell_t
     {
       adaptive_swarm_heal_t* swarm;
       druid_t* druid;
+      double range;
       int stacks;
 
-      adaptive_swarm_heal_event_t( druid_t* p, adaptive_swarm_heal_t* a, int s, timespan_t d )
-        : event_t( *p, d ), swarm( a ), druid( p ), stacks( s )
+      adaptive_swarm_heal_event_t( druid_t* p, adaptive_swarm_heal_t* a, double r, int s, timespan_t d )
+        : event_t( *p, d ), swarm( a ), druid( p ), range( r ), stacks( s )
       {}
 
       const char* name() const override
@@ -7471,7 +7515,7 @@ struct adaptive_swarm_t : public druid_spell_t
         auto& tracker = druid->swarm_tracker;
         tracker.erase( std::remove( tracker.begin(), tracker.end(), this ), tracker.end() );
 
-        swarm->jump_swarm( stacks );
+        swarm->jump_swarm( stacks, range );
       }
     };
 
@@ -7518,7 +7562,8 @@ struct adaptive_swarm_t : public druid_spell_t
       {
         // TODO: fix edge case where a healing swarm will be sent out while another is in-flight allowing you to end up
         // with swarm_tracker.size() > adaptive_swarm_friendly_targets
-        p()->swarm_tracker.push_back( make_event<adaptive_swarm_heal_event_t>( *sim, p(), this, final, dot_duration ) );
+        p()->swarm_tracker.push_back(
+            make_event<adaptive_swarm_heal_event_t>( *sim, p(), this, state( s )->range, final, dot_duration ) );
       }
 
       final = std::min( dot_max_stack, final );
@@ -7566,6 +7611,16 @@ struct adaptive_swarm_t : public druid_spell_t
       g += gcd_add;
 
     return g;
+  }
+
+  // return false on invulnerable targets as this action is !harmful to allow for self-healing, thus will pass the
+  // invulnerable check in action_t::target_ready()
+  bool target_ready( player_t* t ) override
+  {
+    if ( t->debuffs.invulnerable->check() && sim->ignore_invulnerable_targets )
+      return false;
+
+    return druid_spell_t::target_ready( t );
   }
 
   void execute() override
@@ -7711,6 +7766,7 @@ struct convoke_the_spirits_t : public druid_spell_t
     a->set_free_cast( free_cast_e::CONVOKE );
     stats->add_child( a->stats );
     a->gain = gain;
+    a->proc = true;
     return a;
   }
 
@@ -8422,6 +8478,9 @@ struct lycaras_fleeting_glimpse_t : public action_t
 
   void execute() override
   {
+    if ( sim->target_non_sleeping_list.empty() )
+      return;
+
     action_t* a;
 
     if ( druid->buff.moonkin_form->check() )
@@ -9827,8 +9886,7 @@ void druid_t::init()
       break;
   }
 
-  if ( util::str_compare_ci( sim->fight_style, "DungeonSlice" ) ||
-       util::str_compare_ci( sim->fight_style, "DungeonRoute" ) )
+  if ( sim->fight_style == FIGHT_STYLE_DUNGEON_SLICE || sim->fight_style == FIGHT_STYLE_DUNGEON_ROUTE )
   {
     options.adaptive_swarm_friendly_targets = 5;
   }
@@ -10042,7 +10100,7 @@ double druid_t::resource_regen_per_second( resource_e r ) const
 
   if ( r == RESOURCE_ENERGY )
   {
-    if ( buff.savage_roar->check() )
+    if ( get_form() == CAT_FORM && buff.savage_roar->check() )
       reg *= 1.0 + spec.savage_roar->effectN( 3 ).percent();
   }
 
@@ -10133,10 +10191,15 @@ void druid_t::combat_begin()
       if ( !rng().roll( chance ) )
         continue;
 
-      auto stacks = rng().range( min_stack, max_stack );
+      auto stacks   = rng().range( min_stack, max_stack );
       auto duration = rng().range( min_dur, max_dur );
+      auto range    = rng().roll( 0.5 ) ? rng().gauss( options.adaptive_swarm_jump_distance_melee,
+                                                       options.adaptive_swarm_jump_distance_stddev, true )
+                                        : rng().gauss( options.adaptive_swarm_jump_distance_ranged,
+                                                       options.adaptive_swarm_jump_distance_stddev, true );
 
-      swarm_tracker.push_back( make_event<swarm_t::adaptive_swarm_heal_event_t>( *sim, this, heal, stacks, duration ) );
+      swarm_tracker.push_back(
+          make_event<swarm_t::adaptive_swarm_heal_event_t>( *sim, this, heal, range, stacks, duration ) );
     }
   }
 
@@ -10400,17 +10463,8 @@ double druid_t::composite_spell_power( school_e school ) const
 {
   if ( spec_override.spell_power )
   {
-    double weapon_dps;
-
-    if ( buff.cat_form->check() )
-      weapon_dps = cat_weapon.dps;
-    else if ( buff.bear_form->check() )
-      weapon_dps = bear_weapon.dps;
-    else
-      weapon_dps = main_hand_weapon.dps;
-
-    return spec_override.spell_power * composite_attack_power_multiplier() *
-           ( cache.attack_power() + weapon_dps * WEAPON_POWER_COEFFICIENT );
+    return composite_melee_attack_power_by_type( attack_power_type::WEAPON_MAINHAND ) *
+           composite_attack_power_multiplier() * spec_override.spell_power;
   }
 
   return player_t::composite_spell_power( school );
@@ -10943,8 +10997,11 @@ void druid_t::create_options()
     "druid.kindred_spirits_dps_pool_multiplier or druid.kindred_spirits_non_dps_pool_multiplier" ) );
   add_option( opt_deprecated( "druid.kindred_spirits_hide_partner", "this option has been removed" ) );
 
-  add_option( opt_float( "druid.adaptive_swarm_jump_distance_min", options.adaptive_swarm_jump_distance_min ) );
-  add_option( opt_float( "druid.adaptive_swarm_jump_distance_max", options.adaptive_swarm_jump_distance_max ) );
+  add_option( opt_deprecated( "druid.adaptive_swarm_jump_distance_min", "druid.adaptive_swarm_jump_distance_melee" ) );
+  add_option( opt_deprecated( "druid.adaptive_swarm_jump_distance_max", "druid.adaptive_swarm_jump_distance_ranged" ) );
+  add_option( opt_float( "druid.adaptive_swarm_jump_distance_melee", options.adaptive_swarm_jump_distance_melee ) );
+  add_option( opt_float( "druid.adaptive_swarm_jump_distance_ranged", options.adaptive_swarm_jump_distance_ranged ) );
+  add_option( opt_float( "druid.adaptive_swarm_jump_distance_stddev", options.adaptive_swarm_jump_distance_stddev ) );
   add_option( opt_uint( "druid.adaptive_swarm_friendly_targets", options.adaptive_swarm_friendly_targets, 1U, 20U ) );
   add_option( opt_func( "druid.adaptive_swarm_prepull_setup", parse_swarm_setup ) );
   add_option( opt_float( "druid.celestial_spirits_exceptional_chance", options.celestial_spirits_exceptional_chance ) );

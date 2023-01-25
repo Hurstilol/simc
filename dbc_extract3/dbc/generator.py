@@ -1351,6 +1351,8 @@ class SpellDataGenerator(DataGenerator):
          367327, 367455, 367457, 367458, # Gemstone of Prismatic Brilliance
          368643, # Chains of Domination AoE damage
          363338, # Jailer fight buff
+         # Shadowlands Season 4 M+ Shrouded Affix
+         373108, 373113, 373116, 373121, # crit, haste, mastery, versatility
         ),
 
         # Warrior:
@@ -3377,13 +3379,13 @@ class SetBonusListGenerator(DataGenerator):
             'tier'   : 26
         },
         {
-            'name'   : 'cypher_attunement_rigging',
-            'bonuses': [ 1495 ],
+            'name'   : 'tier28',
+            'bonuses': [ 1496, 1497, 1498, 1499, 1500, 1501, 1502, 1503, 1504, 1505, 1506, 1507],
             'tier'   : 28
         },
         {
-            'name'   : 'tier28',
-            'bonuses': [ 1496, 1497, 1498, 1499, 1500, 1501, 1502, 1503, 1504, 1505, 1506, 1507],
+            'name'   : 'ripped_secrets',
+            'bonuses': [ 1508 ],
             'tier'   : 28
         }
     ]
