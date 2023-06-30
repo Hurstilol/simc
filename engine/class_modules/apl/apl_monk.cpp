@@ -774,11 +774,8 @@ namespace monk_apl
     serenity->add_action( "rising_sun_kick,target_if=min:debuff.mark_of_the_crane.remains,if=active_enemies=4&buff.pressure_point.up&!talent.bonedust_brew" );
     serenity->add_action( "rising_sun_kick,target_if=min:debuff.mark_of_the_crane.remains,if=active_enemies=1" );
     serenity->add_action( "rising_sun_kick,target_if=min:debuff.mark_of_the_crane.remains,if=active_enemies<=3&buff.pressure_point.up" );
-    serenity->add_action( "rising_sun_kick,target_if=min:debuff.mark_of_the_crane.remains,if=buff.pressure_point.up&set_bonus.tier30_2pc" );
     serenity->add_action( "rising_sun_kick,target_if=min:debuff.mark_of_the_crane.remains,if=set_bonus.tier30_2pc" );
-    serenity->add_action( "fists_of_fury,if=buff.invokers_delight.up&active_enemies<3&talent.Jade_Ignition,interrupt=1" );
-    serenity->add_action( "fists_of_fury,if=buff.bloodlust.up,interrupt=1" );
-    serenity->add_action( "fists_of_fury,if=buff.invokers_delight.up&active_enemies>4,interrupt=1" );
+    serenity->add_action( "fists_of_fury,if=attack_haste<=0.77,interrupt=1" );
     serenity->add_action( "fists_of_fury,if=active_enemies=2,interrupt=1" );
     serenity->add_action( "fists_of_fury_cancel,target_if=max:target.time_to_die" );
     serenity->add_action( "strike_of_the_windlord,if=talent.thunderfist" );
@@ -896,7 +893,7 @@ namespace monk_apl
     st->add_action( "fists_of_fury" );
     st->add_action( "rising_sun_kick" );
     st->add_action( "blackout_kick,target_if=min:debuff.mark_of_the_crane.remains,if=buff.teachings_of_the_monastery.stack=2" );
-    st->add_action( "strike_of_the_windlord,if=debuff.skyreach_exhaustion.remains>30|fight_remains<5" );
+    st->add_action( "strike_of_the_windlord,if=cooldown.invoke_xuen_the_white_tiger.remains>10|fight_remains<5" );
     st->add_action( "spinning_crane_kick,if=combo_strike&buff.dance_of_chiji.up" );
     st->add_action( "blackout_kick,target_if=min:debuff.mark_of_the_crane.remains,if=buff.teachings_of_the_monastery.up&cooldown.rising_sun_kick.remains>1" );
     st->add_action( "spinning_crane_kick,if=buff.bonedust_brew.up&combo_strike&spinning_crane_kick.modifier>=2.7" );
